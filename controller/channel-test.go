@@ -14,10 +14,29 @@ import (
 	"time"
 )
 
-func testChannel(channel *model.Channel, request ChatRequest) error {
+func testChannel(channel *model.Channel, request ChatRequest) (err error, openaiErr *OpenAIError) {
 	switch channel.Type {
+	case common.ChannelTypePaLM:
+		fallthrough
+	case common.ChannelTypeAnthropic:
+		fallthrough
+	case common.ChannelTypeBaidu:
+		fallthrough
+	case common.ChannelTypeZhipu:
+		fallthrough
+	case common.ChannelTypeAli:
+		fallthrough
+	case common.ChannelType360:
+		fallthrough
+	case common.ChannelTypeXunfei:
+		return errors.New("该渠道类型当前版本不支持测试，请手动测试"), nil
 	case common.ChannelTypeAzure:
 		request.Model = "gpt-35-turbo"
+		defer func() {
+			if err != nil {
+				err = errors.New("请确保已在 Azure 上创建了 gpt-35-turbo 模型，并且 apiVersion 已正确填写！")
+			}
+		}()
 	default:
 		request.Model = "gpt-3.5-turbo"
 	}
@@ -33,11 +52,11 @@ func testChannel(channel *model.Channel, request ChatRequest) error {
 
 	jsonData, err := json.Marshal(request)
 	if err != nil {
-		return err
+		return err, nil
 	}
 	req, err := http.NewRequest("POST", requestURL, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return err
+		return err, nil
 	}
 	if channel.Type == common.ChannelTypeAzure {
 		req.Header.Set("api-key", channel.Key)
@@ -45,21 +64,20 @@ func testChannel(channel *model.Channel, request ChatRequest) error {
 		req.Header.Set("Authorization", "Bearer "+channel.Key)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		return err
+		return err, nil
 	}
 	defer resp.Body.Close()
 	var response TextResponse
 	err = json.NewDecoder(resp.Body).Decode(&response)
 	if err != nil {
-		return err
+		return err, nil
 	}
 	if response.Usage.CompletionTokens == 0 {
-		return errors.New(fmt.Sprintf("type %s, code %v, message %s", response.Error.Type, response.Error.Code, response.Error.Message))
+		return errors.New(fmt.Sprintf("type %s, code %v, message %s", response.Error.Type, response.Error.Code, response.Error.Message)), &response.Error
 	}
-	return nil
+	return nil, nil
 }
 
 func buildTestRequest() *ChatRequest {
@@ -94,7 +112,7 @@ func TestChannel(c *gin.Context) {
 	}
 	testRequest := buildTestRequest()
 	tik := time.Now()
-	err = testChannel(channel, *testRequest)
+	err, _ = testChannel(channel, *testRequest)
 	tok := time.Now()
 	milliseconds := tok.Sub(tik).Milliseconds()
 	go channel.UpdateResponseTime(milliseconds)
@@ -158,13 +176,14 @@ func testAllChannels(notify bool) error {
 				continue
 			}
 			tik := time.Now()
-			err := testChannel(channel, *testRequest)
+			err, openaiErr := testChannel(channel, *testRequest)
 			tok := time.Now()
 			milliseconds := tok.Sub(tik).Milliseconds()
-			if err != nil || milliseconds > disableThreshold {
-				if milliseconds > disableThreshold {
-					err = errors.New(fmt.Sprintf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0))
-				}
+			if milliseconds > disableThreshold {
+				err = errors.New(fmt.Sprintf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0))
+				disableChannel(channel.Id, channel.Name, err.Error())
+			}
+			if shouldDisableChannel(openaiErr, -1) {
 				disableChannel(channel.Id, channel.Name, err.Error())
 			}
 			channel.UpdateResponseTime(milliseconds)
